@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import sys
 import tempfile
 from pathlib import Path
+
+CURRENT_DIR = Path(__file__).resolve().parent
+if str(CURRENT_DIR) not in sys.path:
+    sys.path.append(str(CURRENT_DIR))
 
 import streamlit as st
 
@@ -13,7 +18,7 @@ from agentic_patch_strategist import (
     score_dataframe,
 )
 
-DEFAULT_DATASET_PATH = "sample_data/Agentic_AI_Dataset.csv"
+DEFAULT_DATASET_PATH = CURRENT_DIR / "sample_data" / "Agentic_AI_Dataset.csv"
 
 st.set_page_config(page_title="Agentic Patch Strategist", layout="wide")
 
@@ -64,12 +69,12 @@ def save_uploaded_file(uploaded_file) -> str:
 
 
 def run_pipeline(
-    input_source: str,
+    input_source,
     risk_appetite: str = "balanced",
     what_if_cve: str | None = None,
     what_if_exploit_prob: float = 0.98,
 ):
-    df = load_dataset(input_source)
+    df = load_dataset(str(input_source))
     df = prepare_dataframe(df)
 
     if what_if_cve and str(what_if_cve).strip():
@@ -77,7 +82,7 @@ def run_pipeline(
         df = prepare_dataframe(df)
 
     df = score_dataframe(df, risk_appetite)
-    summary = build_summary(df, input_source, risk_appetite)
+    summary = build_summary(df, str(input_source), risk_appetite)
     return df, summary
 
 
@@ -87,7 +92,7 @@ try:
         display_input_name = uploaded_file.name
     else:
         input_path = DEFAULT_DATASET_PATH
-        display_input_name = DEFAULT_DATASET_PATH
+        display_input_name = str(DEFAULT_DATASET_PATH.name)
 
     df, summary = run_pipeline(
         input_source=input_path,
