@@ -1,102 +1,165 @@
 from __future__ import annotations
 
-import json
-from io import BytesIO
+import tempfile
 from pathlib import Path
 
-import pandas as pd
 import streamlit as st
 
-from agentic_patch_strategist import _calc_scores, _normalize, _read_input, build_summary, run_what_if
+from agentic_patch_strategist import (
+    apply_what_if,
+    build_summary,
+    load_dataset,
+    prepare_dataframe,
+    score_dataframe,
+)
+
+DEFAULT_DATASET_PATH = "sample_data/Agentic_AI_Dataset.csv"
 
 st.set_page_config(page_title="Agentic Patch Strategist", layout="wide")
+
 st.title("Agentic Patch Strategist")
-st.caption("Business-aware vulnerability prioritization demo")
-
-sample_path = Path(__file__).parent / "sample_data" / "Agentic_AI_Dataset.csv"
-
-
-def load_uploaded(file) -> pd.DataFrame:
-    suffix = Path(file.name).suffix.lower()
-    if suffix == ".csv":
-        df = pd.read_csv(file)
-    elif suffix in {".xlsx", ".xls"}:
-        df = pd.read_excel(file)
-    else:
-        raise ValueError("Upload a CSV or Excel file.")
-    return _normalize(df)
-
+st.caption("Business-aware, dependency-aware vulnerability prioritization")
 
 with st.sidebar:
     st.header("Controls")
-    risk_appetite = st.selectbox("Risk appetite", ["conservative", "balanced", "aggressive"], index=1)
-    uploaded = st.file_uploader("Upload CSV/XLSX dataset", type=["csv", "xlsx", "xls"])
-    use_sample = st.checkbox("Use built-in sample data", value=uploaded is None)
-    run_what_if_toggle = st.checkbox("Run what-if exploit spike")
-    what_if_cve = st.text_input("CVE to spike", value="CVE-2024-3400")
-    epss_increase = st.slider("EPSS increase", min_value=0.05, max_value=0.80, value=0.25, step=0.05)
 
-try:
-    if uploaded is not None:
-        df = load_uploaded(uploaded)
-    elif use_sample:
-        df = _normalize(_read_input(sample_path))
-    else:
-        st.info("Upload a dataset or enable sample data.")
-        st.stop()
-except Exception as exc:
-    st.error(f"Failed to load data: {exc}")
-    st.stop()
+    risk_appetite = st.selectbox(
+        "Risk appetite",
+        ["balanced", "aggressive", "conservative"],
+        index=0,
+    )
 
-ranked = _calc_scores(df, risk_appetite)
-summary = build_summary(ranked)
+    enable_what_if = st.checkbox("Enable what-if simulation", value=False)
 
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Records", summary["records"])
-c2.metric("Total expected loss", f"${summary['total_expected_loss']:,.0f}")
-c3.metric("Systems covered", len(summary["systems_covered"]))
-c4.metric("Top action", ranked.iloc[0]["recommended_action"])
+    what_if_cve = ""
+    what_if_exploit_prob = 0.98
 
-st.subheader("Top recommendations")
-st.dataframe(
-    ranked[[
-        "cve_id", "affected_system", "priority_score", "expected_loss",
-        "recommended_action", "recommended_patch_window"
-    ]].round({"priority_score": 3, "expected_loss": 2}),
-    use_container_width=True,
+    if enable_what_if:
+        what_if_cve = st.text_input("CVE ID for what-if", value="")
+        what_if_exploit_prob = st.slider(
+            "Simulated exploit probability",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.98,
+            step=0.01,
+        )
+
+uploaded_file = st.file_uploader(
+    "Upload CSV/XLSX dataset",
+    type=["csv", "xlsx", "xls"],
 )
 
-st.subheader("Priority score by vulnerability")
-chart_df = ranked[["cve_id", "priority_score"]].set_index("cve_id")
-st.bar_chart(chart_df)
+st.info(
+    "Expected columns: CVE ID, CVSS Score, Severity, Exploit Prob (EPSS), "
+    "Affected System, Criticality, Business Impact, Dependency Score, "
+    "Downtime Cost, Est. Effort"
+)
 
-st.subheader("Explanations")
-for _, row in ranked.head(5).iterrows():
-    st.write(f"**{row['cve_id']} - {row['affected_system']}**")
-    st.write(row["explanation"])
 
-csv_bytes = ranked.to_csv(index=False).encode("utf-8")
-st.download_button("Download ranked CSV", data=csv_bytes, file_name="ranked_patch_plan.csv", mime="text/csv")
-st.download_button("Download summary JSON", data=json.dumps(summary, indent=2), file_name="summary.json", mime="application/json")
+def save_uploaded_file(uploaded_file) -> str:
+    suffix = Path(uploaded_file.name).suffix.lower()
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(uploaded_file.getbuffer())
+        return tmp.name
 
-if run_what_if_toggle:
-    st.subheader("What-if simulation")
-    try:
-        baseline, scenario = run_what_if(df, what_if_cve, epss_increase, risk_appetite)
-        compare = baseline[["cve_id", "priority_score"]].merge(
-            scenario[["cve_id", "priority_score", "score_delta"]],
-            on="cve_id",
-            suffixes=("_baseline", "_scenario"),
-        ).sort_values("score_delta", ascending=False)
-        st.dataframe(compare.round(3), use_container_width=True)
 
-        out = BytesIO()
-        compare.to_csv(out, index=False)
-        st.download_button(
-            "Download what-if comparison CSV",
-            data=out.getvalue(),
-            file_name="what_if_comparison.csv",
-            mime="text/csv",
+def run_pipeline(
+    input_source: str,
+    risk_appetite: str = "balanced",
+    what_if_cve: str | None = None,
+    what_if_exploit_prob: float = 0.98,
+):
+    df = load_dataset(input_source)
+    df = prepare_dataframe(df)
+
+    if what_if_cve and str(what_if_cve).strip():
+        df = apply_what_if(df, str(what_if_cve).strip(), float(what_if_exploit_prob))
+        df = prepare_dataframe(df)
+
+    df = score_dataframe(df, risk_appetite)
+    summary = build_summary(df, input_source, risk_appetite)
+    return df, summary
+
+
+try:
+    if uploaded_file is not None:
+        input_path = save_uploaded_file(uploaded_file)
+        display_input_name = uploaded_file.name
+    else:
+        input_path = DEFAULT_DATASET_PATH
+        display_input_name = DEFAULT_DATASET_PATH
+
+    df, summary = run_pipeline(
+        input_source=input_path,
+        risk_appetite=risk_appetite,
+        what_if_cve=what_if_cve if enable_what_if else None,
+        what_if_exploit_prob=what_if_exploit_prob if enable_what_if else 0.98,
+    )
+
+    summary["input_file"] = display_input_name
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total vulnerabilities", summary["total_vulnerabilities"])
+    c2.metric("Top priority CVE", summary["top_priority_cve"])
+    c3.metric(
+        "Top priority score",
+        f'{summary["top_priority_score"]:.4f}' if summary["top_priority_score"] is not None else "N/A",
+    )
+    c4.metric("Immediate patch count", summary["immediate_patch_count"])
+
+    st.subheader("Dataset in use")
+    st.write(summary["input_file"])
+
+    st.subheader("Top recommendations")
+    display_cols = [
+        "CVE ID",
+        "Affected System",
+        "CVSS Score",
+        "Severity",
+        "Exploit Prob (EPSS)",
+        "Criticality",
+        "Business Impact",
+        "Dependency Score",
+        "Downtime Cost",
+        "Est. Effort",
+        "priority_score",
+        "recommended_action",
+        "recommended_window",
+        "explanation",
+    ]
+    display_cols = [col for col in display_cols if col in df.columns]
+    st.dataframe(df[display_cols], use_container_width=True)
+
+    st.subheader("Priority score by vulnerability")
+    chart_df = df[["CVE ID", "priority_score"]].set_index("CVE ID")
+    st.bar_chart(chart_df)
+
+    st.subheader("Recommended action breakdown")
+    action_counts = (
+        df["recommended_action"]
+        .value_counts()
+        .rename_axis("Action")
+        .reset_index(name="Count")
+    )
+    st.dataframe(action_counts, use_container_width=True)
+
+    st.subheader("Top explanations")
+    for _, row in df.head(5).iterrows():
+        st.markdown(
+            f"**{row['CVE ID']} - {row['Affected System']}**  \n"
+            f"Priority Score: `{row['priority_score']}`  \n"
+            f"Action: **{row['recommended_action']}**  \n"
+            f"Window: **{row['recommended_window']}**  \n"
+            f"{row['explanation']}"
         )
-    except Exception as exc:
-        st.error(f"What-if simulation failed: {exc}")
+
+    csv_data = df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        label="Download ranked patch plan (CSV)",
+        data=csv_data,
+        file_name="ranked_patch_plan.csv",
+        mime="text/csv",
+    )
+
+except Exception as e:
+    st.error(f"Error processing data: {e}")

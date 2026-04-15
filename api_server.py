@@ -1,82 +1,107 @@
 from __future__ import annotations
 
 import io
-from typing import Literal, Optional
+import tempfile
+from pathlib import Path
+from typing import Optional
 
 import pandas as pd
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, File, Form, UploadFile
+from fastapi.responses import JSONResponse
 
-from agentic_patch_strategist import _calc_scores, _normalize, build_summary, run_what_if
+from agentic_patch_strategist import (
+    build_summary,
+    load_dataset,
+    prepare_dataframe,
+    apply_what_if,
+    score_dataframe,
+)
 
-app = FastAPI(title="Agentic Patch Strategist API", version="1.0.0")
-
-RiskAppetite = Literal["conservative", "balanced", "aggressive"]
-
-
-class RankRequest(BaseModel):
-    records: list[dict] = Field(..., description="List of vulnerability records")
-    risk_appetite: RiskAppetite = "balanced"
-
-
-class WhatIfRequest(BaseModel):
-    records: list[dict]
-    cve_id: str
-    epss_increase: float = 0.25
-    risk_appetite: RiskAppetite = "balanced"
+app = FastAPI(title="Agentic Patch Strategist API")
 
 
 @app.get("/health")
-def health() -> dict:
+def health():
     return {"status": "ok"}
 
 
 @app.post("/rank")
-def rank_payload(req: RankRequest) -> dict:
-    try:
-        df = _normalize(pd.DataFrame(req.records))
-        ranked = _calc_scores(df, req.risk_appetite)
-        return {
-            "summary": build_summary(ranked),
-            "ranked_records": ranked.round({"priority_score": 6, "expected_loss": 2}).to_dict(orient="records"),
-        }
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+def rank_data(
+    risk_appetite: str = Form("balanced"),
+):
+    return {
+        "message": "Use /upload-rank to upload a CSV/XLSX file, or extend this endpoint for JSON payloads."
+    }
 
 
 @app.post("/what-if")
-def what_if_payload(req: WhatIfRequest) -> dict:
-    try:
-        df = _normalize(pd.DataFrame(req.records))
-        baseline, scenario = run_what_if(df, req.cve_id, req.epss_increase, req.risk_appetite)
-        return {
-            "baseline_summary": build_summary(baseline),
-            "scenario_summary": build_summary(scenario),
-            "baseline_records": baseline.round({"priority_score": 6, "expected_loss": 2}).to_dict(orient="records"),
-            "scenario_records": scenario.round({"priority_score": 6, "expected_loss": 2}).to_dict(orient="records"),
-        }
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+def what_if_data(
+    risk_appetite: str = Form("balanced"),
+    what_if_cve: str = Form(...),
+    what_if_exploit_prob: float = Form(0.98),
+):
+    return {
+        "message": "Use /upload-rank with what-if parameters and a file upload."
+    }
 
 
 @app.post("/upload-rank")
 async def upload_rank(
     file: UploadFile = File(...),
-    risk_appetite: RiskAppetite = Form("balanced"),
-) -> dict:
+    risk_appetite: str = Form("balanced"),
+    what_if_cve: Optional[str] = Form(None),
+    what_if_exploit_prob: float = Form(0.98),
+):
     try:
-        content = await file.read()
-        suffix = file.filename.lower().split(".")[-1]
-        if suffix == "csv":
-            df = pd.read_csv(io.BytesIO(content))
-        elif suffix in {"xlsx", "xls"}:
-            df = pd.read_excel(io.BytesIO(content))
-        else:
-            raise ValueError("Supported upload types are csv, xlsx, xls")
-        ranked = _calc_scores(_normalize(df), risk_appetite)
+        suffix = Path(file.filename).suffix.lower()
+
+        if suffix not in {".csv", ".xlsx", ".xls"}:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Unsupported file type. Please upload CSV or XLSX."},
+            )
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            contents = await file.read()
+            tmp.write(contents)
+            temp_path = tmp.name
+
+        df = load_dataset(temp_path)
+        df = prepare_dataframe(df)
+
+        if what_if_cve:
+            df = apply_what_if(df, what_if_cve, what_if_exploit_prob)
+            df = prepare_dataframe(df)
+
+        df = score_dataframe(df, risk_appetite)
+
+        summary = build_summary(
+            df=df,
+            input_path=file.filename,
+            risk_appetite=risk_appetite,
+        )
+
+        preview_columns = [
+            "CVE ID",
+            "Affected System",
+            "CVSS Score",
+            "Severity",
+            "Exploit Prob (EPSS)",
+            "priority_score",
+            "recommended_action",
+            "recommended_window",
+            "explanation",
+        ]
+
+        preview_columns = [col for col in preview_columns if col in df.columns]
+
         return {
-            "summary": build_summary(ranked),
-            "ranked_records": ranked.round({"priority_score": 6, "expected_loss": 2}).to_dict(orient="records"),
+            "summary": summary,
+            "rows": df[preview_columns].to_dict(orient="records"),
         }
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)},
+        )
