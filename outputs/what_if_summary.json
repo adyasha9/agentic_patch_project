@@ -1,0 +1,90 @@
+{
+  "baseline": {
+    "records": 30,
+    "top_recommendations": [
+      {
+        "cve_id": "CVE-2024-24919",
+        "affected_system": "Login Service",
+        "priority_score": 0.861,
+        "recommended_action": "Patch immediately"
+      },
+      {
+        "cve_id": "CVE-2024-3400",
+        "affected_system": "Payment API",
+        "priority_score": 0.84,
+        "recommended_action": "Patch immediately"
+      },
+      {
+        "cve_id": "CVE-2024-1709",
+        "affected_system": "Login Service",
+        "priority_score": 0.556,
+        "recommended_action": "Patch in next maintenance window"
+      },
+      {
+        "cve_id": "CVE-2023-44487",
+        "affected_system": "Payment API",
+        "priority_score": 0.546,
+        "recommended_action": "Patch in next maintenance window"
+      },
+      {
+        "cve_id": "CVE-2024-4577",
+        "affected_system": "Payment API",
+        "priority_score": 0.535,
+        "recommended_action": "Patch in next maintenance window"
+      }
+    ],
+    "total_expected_loss": 12772.690000000002,
+    "systems_covered": [
+      "Analytics",
+      "Core API",
+      "Database",
+      "Login Service",
+      "Payment API"
+    ]
+  },
+  "scenario": {
+    "records": 30,
+    "top_recommendations": [
+      {
+        "cve_id": "CVE-2024-3400",
+        "affected_system": "Payment API",
+        "priority_score": 0.866,
+        "recommended_action": "Patch immediately"
+      },
+      {
+        "cve_id": "CVE-2024-24919",
+        "affected_system": "Login Service",
+        "priority_score": 0.861,
+        "recommended_action": "Patch immediately"
+      },
+      {
+        "cve_id": "CVE-2024-1709",
+        "affected_system": "Login Service",
+        "priority_score": 0.556,
+        "recommended_action": "Patch in next maintenance window"
+      },
+      {
+        "cve_id": "CVE-2023-44487",
+        "affected_system": "Payment API",
+        "priority_score": 0.546,
+        "recommended_action": "Patch in next maintenance window"
+      },
+      {
+        "cve_id": "CVE-2024-4577",
+        "affected_system": "Payment API",
+        "priority_score": 0.535,
+        "recommended_action": "Patch in next maintenance window"
+      }
+    ],
+    "total_expected_loss": 12802.690000000002,
+    "systems_covered": [
+      "Analytics",
+      "Core API",
+      "Database",
+      "Login Service",
+      "Payment API"
+    ]
+  },
+  "what_if_cve": "CVE-2024-3400",
+  "epss_increase": 0.25
+}
