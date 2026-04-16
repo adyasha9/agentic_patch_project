@@ -11,15 +11,11 @@ if str(CURRENT_DIR) not in sys.path:
 import streamlit as st
 
 from agentic_patch_strategist import (
-    IngestAgent,
-    RiskScoringAgent,
-    BusinessImpactAgent,
-    DependencyAgent,
-    CustomerImpactAgent,
-    WhatIfAgent,
-    ComplianceAgent,
-    SchedulerAgent,
-    compute_priority_scores,
+    load_dataset,
+    prepare_dataframe,
+    apply_what_if,
+    score_dataframe,
+    build_summary,
 )
 
 DEFAULT_DATASET_PATH = CURRENT_DIR / "sample_data" / "Agentic_AI_Dataset.csv"
@@ -108,20 +104,16 @@ def run_pipeline(
     schedule_start: str | None = None,
     window_days: int = 7,
 ):
-    ingest_agent = IngestAgent()
-    risk_agent = RiskScoringAgent()
-    business_agent = BusinessImpactAgent()
-    dependency_agent = DependencyAgent()
-    customer_agent = CustomerImpactAgent()
-    what_if_agent = WhatIfAgent()
-    compliance_agent = ComplianceAgent()
-    scheduler_agent = SchedulerAgent(
-        start_date=schedule_start if schedule_start else None,
-        window_days=window_days,
-    )
 
-    df = ingest_agent.run(str(input_source))
-    df = risk_agent.run(df)
+    df = load_dataset(input_path)
+    df = prepare_dataframe(df)
+
+    if what_if_cve and str(what_if_cve).strip():
+        df = apply_what_if(df, what_if_cve, what_if_exploit_prob)
+        df = prepare_dataframe(df)
+
+    df = score_dataframe(df, risk_appetite)
+    summary = build_summary(df, input_path, risk_appetite)
 
     df = what_if_agent.run(
         df,
