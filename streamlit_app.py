@@ -81,9 +81,7 @@ uploaded_file = st.file_uploader(
 st.info(
     "Expected columns: CVE ID, CVSS Score, Severity, Exploit Prob (EPSS), "
     "Affected System, Criticality, Business Impact, Dependency Score, "
-    "Downtime Cost, Est. Effort, Tier, Compliance Tags, Rollback Risk, "
-    "Vendor, Patch Available, SBOM Component, Maintenance Window, "
-    "Customer Impact, Description, Expected Loss, Downtime Sensitivity, Cascade Risk"
+    "Downtime Cost, Est. Effort"
 )
 
 
@@ -104,47 +102,90 @@ def run_pipeline(
     schedule_start: str | None = None,
     window_days: int = 7,
 ):
-
-    df = load_dataset(input_path)
+    df = load_dataset(str(input_source))
     df = prepare_dataframe(df)
 
+    # exploit spike simulation
     if what_if_cve and str(what_if_cve).strip():
-        df = apply_what_if(df, what_if_cve, what_if_exploit_prob)
+        df = apply_what_if(df, str(what_if_cve).strip(), float(what_if_exploit_prob))
         df = prepare_dataframe(df)
 
+    # optional delay note - lightweight simulation kept in app layer
+    if what_if_delay and str(what_if_delay).strip():
+        mask = df["CVE ID"].astype(str).str.strip().str.lower() == str(what_if_delay).strip().lower()
+        if mask.any():
+            note = f"Delay simulation: patch delayed by {int(delay_days)} days."
+            df.loc[mask, "what_if_note"] = note
+
     df = score_dataframe(df, risk_appetite)
-    summary = build_summary(df, input_path, risk_appetite)
-    df = apply_what_if(df, what_if_cve, what_if_exploit_prob)
-    df = prepare_dataframe(df)
 
-    if what_if_cve and str(what_if_cve).strip():
-        df = risk_agent.run(df)
+    # add fallback columns so existing UI sections still work
+    if "risk_tier" not in df.columns:
+        def _risk_tier(score: float) -> str:
+            if score >= 0.75:
+                return "P1 – Critical"
+            if score >= 0.55:
+                return "P2 – High"
+            if score >= 0.35:
+                return "P3 – Medium"
+            return "P4 – Low"
+        df["risk_tier"] = df["priority_score"].apply(_risk_tier)
 
-    df = business_agent.run(df)
-    df = dependency_agent.run(df)
-    df = customer_agent.run(df)
-    df = compliance_agent.run(df)
-    df = compute_priority_scores(df, risk_appetite, aggressive_escalation=True)
-    df = scheduler_agent.run(df)
+    if "scheduled_date" not in df.columns:
+        if schedule_start and str(schedule_start).strip():
+            df["scheduled_date"] = str(schedule_start).strip()
+        else:
+            df["scheduled_date"] = "Next available window"
+
+    if "schedule_slot" not in df.columns:
+        df["schedule_slot"] = "Standard"
+
+    if "scheduling_conflict" not in df.columns:
+        df["scheduling_conflict"] = False
+
+    if "detected_compliance" not in df.columns:
+        df["detected_compliance"] = ""
+
+    if "cascade_risk" not in df.columns:
+        df["cascade_risk"] = df.get("dependency_score_norm", 0.0)
+
+    if "downstream_count" not in df.columns:
+        df["downstream_count"] = 0
+
+    if "customer_impact_norm" not in df.columns:
+        df["customer_impact_norm"] = 0.0
+
+    if "Tier" not in df.columns:
+        df["Tier"] = "N/A"
+
+    if "Expected Loss" not in df.columns:
+        df["Expected Loss"] = 0.0
+
+    if "Vendor" not in df.columns:
+        df["Vendor"] = ""
+
+    if "Patch Available" not in df.columns:
+        df["Patch Available"] = ""
+
+    if "SBOM Component" not in df.columns:
+        df["SBOM Component"] = ""
+
+    if "Description" not in df.columns:
+        df["Description"] = ""
+
+    if "what_if_note" not in df.columns:
+        df["what_if_note"] = ""
 
     return df
 
 
-def build_summary(df, input_name: str, risk_appetite: str):
-    return {
-        "input_file": input_name,
-        "risk_appetite": risk_appetite,
-        "total_vulnerabilities": int(len(df)),
-        "top_priority_cve": str(df.iloc[0]["CVE ID"]) if len(df) else "N/A",
-        "top_priority_score": float(df.iloc[0]["priority_score"]) if len(df) else None,
-        "p1_critical_count": int((df["risk_tier"] == "P1 – Critical").sum()) if "risk_tier" in df.columns else 0,
-        "immediate_patch_count": int((df["recommended_action"] == "Patch immediately").sum()) if "recommended_action" in df.columns else 0,
-        "next_window_count": int((df["recommended_action"] == "Patch in next maintenance window").sum()) if "recommended_action" in df.columns else 0,
-        "schedule_monitor_count": int((df["recommended_action"] == "Schedule and monitor").sum()) if "recommended_action" in df.columns else 0,
-        "monitor_count": int((df["recommended_action"] == "Monitor for now").sum()) if "recommended_action" in df.columns else 0,
-        "compliance_exposed_count": int((df["detected_compliance"].fillna("") != "").sum()) if "detected_compliance" in df.columns else 0,
-        "conflict_count": int(df["scheduling_conflict"].sum()) if "scheduling_conflict" in df.columns else 0,
-    }
+def build_app_summary(df, input_name: str, risk_appetite: str):
+    base_summary = build_summary(df, input_name, risk_appetite)
+    base_summary["p1_critical_count"] = int((df["risk_tier"] == "P1 – Critical").sum()) if "risk_tier" in df.columns else 0
+    base_summary["schedule_monitor_count"] = int((df["recommended_action"] == "Schedule and monitor").sum()) if "recommended_action" in df.columns else 0
+    base_summary["compliance_exposed_count"] = int((df["detected_compliance"].fillna("") != "").sum()) if "detected_compliance" in df.columns else 0
+    base_summary["conflict_count"] = int(df["scheduling_conflict"].sum()) if "scheduling_conflict" in df.columns else 0
+    return base_summary
 
 
 try:
@@ -166,14 +207,14 @@ try:
         window_days=int(window_days),
     )
 
-    summary = build_summary(df, display_input_name, risk_appetite)
+    summary = build_app_summary(df, display_input_name, risk_appetite)
 
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("Total vulnerabilities", summary["total_vulnerabilities"])
     c2.metric("Top priority CVE", summary["top_priority_cve"])
     c3.metric(
         "Top priority score",
-        f'{summary["top_priority_score"]:.2f}/10' if summary["top_priority_score"] is not None else "N/A",
+        f'{summary["top_priority_score"]:.4f}' if summary["top_priority_score"] is not None else "N/A",
     )
     c4.metric("P1 Critical", summary["p1_critical_count"])
     c5.metric("Immediate patch count", summary["immediate_patch_count"])
@@ -213,7 +254,7 @@ try:
         "explanation",
     ]
     display_cols = [col for col in display_cols if col in df.columns]
-    st.dataframe(df[display_cols])
+    st.dataframe(df[display_cols], use_container_width=True)
 
     st.subheader("Priority score by vulnerability")
     chart_df = df[["CVE ID", "priority_score"]].set_index("CVE ID")
@@ -226,7 +267,7 @@ try:
         .rename_axis("Action")
         .reset_index(name="Count")
     )
-    st.dataframe(action_counts)
+    st.dataframe(action_counts, use_container_width=True)
 
     if "risk_tier" in df.columns:
         st.subheader("Risk tier breakdown")
@@ -236,7 +277,7 @@ try:
             .rename_axis("Risk Tier")
             .reset_index(name="Count")
         )
-        st.dataframe(tier_counts)
+        st.dataframe(tier_counts, use_container_width=True)
 
     if "detected_compliance" in df.columns:
         st.subheader("Compliance exposure preview")
@@ -245,7 +286,7 @@ try:
         ].copy()
         compliance_view = compliance_view[compliance_view["detected_compliance"].fillna("") != ""]
         if len(compliance_view) > 0:
-            st.dataframe(compliance_view)
+            st.dataframe(compliance_view, use_container_width=True)
         else:
             st.write("No compliance exposure detected in the current dataset.")
 
@@ -253,7 +294,7 @@ try:
     for _, row in df.head(5).iterrows():
         st.markdown(
             f"**{row['CVE ID']} - {row['Affected System']}**  \n"
-            f"Priority Score: `{row['priority_score']:.2f}/10`  \n"
+            f"Priority Score: `{row['priority_score']:.4f}`  \n"
             f"Risk Tier: **{row.get('risk_tier', 'N/A')}**  \n"
             f"Action: **{row['recommended_action']}**  \n"
             f"Window: **{row['recommended_window']}**  \n"
