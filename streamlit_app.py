@@ -25,7 +25,6 @@ st.set_page_config(page_title="Agentic Patch Strategist", layout="wide")
 st.title("Agentic Patch Strategist")
 st.caption("Business-aware, dependency-aware vulnerability prioritization")
 
-
 with st.sidebar:
     st.header("Controls")
 
@@ -72,7 +71,6 @@ with st.sidebar:
         step=1,
     )
 
-
 uploaded_file = st.file_uploader(
     "Upload CSV/XLSX dataset",
     type=["csv", "xlsx", "xls"],
@@ -92,6 +90,43 @@ def save_uploaded_file(uploaded_file) -> str:
         return tmp.name
 
 
+def derive_tier_from_criticality(criticality: str) -> str:
+    mapping = {
+        "critical": "Tier 1",
+        "high": "Tier 1",
+        "medium": "Tier 2",
+        "moderate": "Tier 2",
+        "low": "Tier 3",
+    }
+    return mapping.get(str(criticality).strip().lower(), "Tier 2")
+
+
+def derive_risk_tier(priority_score: float) -> str:
+    if priority_score >= 0.75:
+        return "P1 - Critical"
+    if priority_score >= 0.55:
+        return "P2 - High"
+    if priority_score >= 0.35:
+        return "P3 - Medium"
+    return "P4 - Low"
+
+
+def detect_compliance(system_name: str) -> str:
+    s = str(system_name).lower()
+    tags = []
+
+    if any(x in s for x in ["payment", "billing", "checkout", "card"]):
+        tags.append("PCI-DSS")
+    if any(x in s for x in ["login", "auth", "identity", "user"]):
+        tags.append("GDPR")
+    if any(x in s for x in ["health", "patient", "medical"]):
+        tags.append("HIPAA")
+    if any(x in s for x in ["finance", "ledger", "accounting", "report"]):
+        tags.append("SOX")
+
+    return ", ".join(tags)
+
+
 def run_pipeline(
     input_source,
     risk_appetite: str = "balanced",
@@ -105,83 +140,79 @@ def run_pipeline(
     df = load_dataset(str(input_source))
     df = prepare_dataframe(df)
 
-    # exploit spike simulation
     if what_if_cve and str(what_if_cve).strip():
         df = apply_what_if(df, str(what_if_cve).strip(), float(what_if_exploit_prob))
         df = prepare_dataframe(df)
 
-    # optional delay note - lightweight simulation kept in app layer
-    if what_if_delay and str(what_if_delay).strip():
-        mask = df["CVE ID"].astype(str).str.strip().str.lower() == str(what_if_delay).strip().lower()
-        if mask.any():
-            note = f"Delay simulation: patch delayed by {int(delay_days)} days."
-            df.loc[mask, "what_if_note"] = note
-
     df = score_dataframe(df, risk_appetite)
 
-    # add fallback columns so existing UI sections still work
-    if "risk_tier" not in df.columns:
-        def _risk_tier(score: float) -> str:
-            if score >= 0.75:
-                return "P1 – Critical"
-            if score >= 0.55:
-                return "P2 – High"
-            if score >= 0.35:
-                return "P3 – Medium"
-            return "P4 – Low"
-        df["risk_tier"] = df["priority_score"].apply(_risk_tier)
+    # Clean derived fields for display
+    if "Tier" not in df.columns:
+        df["Tier"] = df["Criticality"].apply(derive_tier_from_criticality)
+    else:
+        df["Tier"] = df["Tier"].fillna("").astype(str)
+        blank_tier_mask = df["Tier"].str.strip() == ""
+        df.loc[blank_tier_mask, "Tier"] = df.loc[blank_tier_mask, "Criticality"].apply(
+            derive_tier_from_criticality
+        )
 
-    if "scheduled_date" not in df.columns:
-        if schedule_start and str(schedule_start).strip():
-            df["scheduled_date"] = str(schedule_start).strip()
-        else:
-            df["scheduled_date"] = "Next available window"
+    df["Expected Loss"] = (
+        df["CVSS Score"].fillna(5.0).astype(float)
+        * df["Exploit Prob (EPSS)"].fillna(0.5).astype(float)
+        * df["Business Impact"].fillna(50.0).astype(float)
+    ).round(2)
 
-    if "schedule_slot" not in df.columns:
-        df["schedule_slot"] = "Standard"
+    df["cascade_risk"] = df["dependency_score_norm"].fillna(0.0).round(4)
+    df["downstream_count"] = (
+        (df["Dependency Score"].fillna(0).astype(float) - 1).clip(lower=0).astype(int)
+    )
 
-    if "scheduling_conflict" not in df.columns:
-        df["scheduling_conflict"] = False
-
-    if "detected_compliance" not in df.columns:
-        df["detected_compliance"] = ""
-
-    if "cascade_risk" not in df.columns:
-        df["cascade_risk"] = df.get("dependency_score_norm", 0.0)
-
-    if "downstream_count" not in df.columns:
-        df["downstream_count"] = 0
+    df["detected_compliance"] = df["Affected System"].apply(detect_compliance)
 
     if "customer_impact_norm" not in df.columns:
-        df["customer_impact_norm"] = 0.0
+        df["customer_impact_norm"] = df["Affected System"].astype(str).str.lower().apply(
+            lambda s: 0.9 if any(x in s for x in ["payment", "login", "auth", "frontend", "api"])
+            else 0.5
+        )
 
-    if "Tier" not in df.columns:
-        df["Tier"] = "N/A"
+    if "risk_tier" not in df.columns:
+        df["risk_tier"] = df["priority_score"].apply(derive_risk_tier)
 
-    if "Expected Loss" not in df.columns:
-        df["Expected Loss"] = 0.0
+    if schedule_start and str(schedule_start).strip():
+        immediate_date = str(schedule_start).strip()
+    else:
+        immediate_date = "Next available window"
 
-    if "Vendor" not in df.columns:
-        df["Vendor"] = ""
+    df["scheduled_date"] = df["recommended_action"].map({
+        "Patch immediately": immediate_date,
+        "Patch in next maintenance window": "Next maintenance window",
+        "Schedule and monitor": "Planned low-traffic window",
+        "Monitor for now": "Deferred",
+    }).fillna("Deferred")
 
-    if "Patch Available" not in df.columns:
-        df["Patch Available"] = ""
+    df["schedule_slot"] = df["recommended_action"].map({
+        "Patch immediately": "Emergency Slot 1",
+        "Patch in next maintenance window": "Standard Slot 1",
+        "Schedule and monitor": "Planned Slot 1",
+        "Monitor for now": "N/A",
+    }).fillna("N/A")
 
-    if "SBOM Component" not in df.columns:
-        df["SBOM Component"] = ""
-
-    if "Description" not in df.columns:
-        df["Description"] = ""
+    df["scheduling_conflict"] = False
 
     if "what_if_note" not in df.columns:
         df["what_if_note"] = ""
+
+    if what_if_delay and str(what_if_delay).strip():
+        mask = df["CVE ID"].astype(str).str.strip().str.lower() == str(what_if_delay).strip().lower()
+        if mask.any():
+            df.loc[mask, "what_if_note"] = f"Delay simulation: patch delayed by {int(delay_days)} days."
 
     return df
 
 
 def build_app_summary(df, input_name: str, risk_appetite: str):
     base_summary = build_summary(df, input_name, risk_appetite)
-    base_summary["p1_critical_count"] = int((df["risk_tier"] == "P1 – Critical").sum()) if "risk_tier" in df.columns else 0
+    base_summary["p1_critical_count"] = int((df["risk_tier"] == "P1 - Critical").sum()) if "risk_tier" in df.columns else 0
     base_summary["schedule_monitor_count"] = int((df["recommended_action"] == "Schedule and monitor").sum()) if "recommended_action" in df.columns else 0
     base_summary["compliance_exposed_count"] = int((df["detected_compliance"].fillna("") != "").sum()) if "detected_compliance" in df.columns else 0
     base_summary["conflict_count"] = int(df["scheduling_conflict"].sum()) if "scheduling_conflict" in df.columns else 0
@@ -218,7 +249,7 @@ try:
     )
     c4.metric("P1 Critical", summary["p1_critical_count"])
     c5.metric("Immediate patch count", summary["immediate_patch_count"])
-    c6.metric("Conflicts", summary["conflict_count"])
+    c6.metric("Compliance Exposed", summary["compliance_exposed_count"])
 
     st.subheader("Dataset in use")
     st.write(summary["input_file"])
@@ -235,22 +266,12 @@ try:
         "Business Impact",
         "Dependency Score",
         "Expected Loss",
-        "cascade_risk",
-        "downstream_count",
-        "detected_compliance",
-        "customer_impact_norm",
         "priority_score",
         "risk_tier",
         "recommended_action",
         "recommended_window",
         "scheduled_date",
-        "schedule_slot",
-        "scheduling_conflict",
         "what_if_note",
-        "Vendor",
-        "Patch Available",
-        "SBOM Component",
-        "Description",
         "explanation",
     ]
     display_cols = [col for col in display_cols if col in df.columns]
@@ -269,26 +290,24 @@ try:
     )
     st.dataframe(action_counts, use_container_width=True)
 
-    if "risk_tier" in df.columns:
-        st.subheader("Risk tier breakdown")
-        tier_counts = (
-            df["risk_tier"]
-            .value_counts()
-            .rename_axis("Risk Tier")
-            .reset_index(name="Count")
-        )
-        st.dataframe(tier_counts, use_container_width=True)
+    st.subheader("Risk tier breakdown")
+    tier_counts = (
+        df["risk_tier"]
+        .value_counts()
+        .rename_axis("Risk Tier")
+        .reset_index(name="Count")
+    )
+    st.dataframe(tier_counts, use_container_width=True)
 
-    if "detected_compliance" in df.columns:
-        st.subheader("Compliance exposure preview")
-        compliance_view = df[
-            ["CVE ID", "Affected System", "detected_compliance", "recommended_action", "scheduled_date"]
-        ].copy()
-        compliance_view = compliance_view[compliance_view["detected_compliance"].fillna("") != ""]
-        if len(compliance_view) > 0:
-            st.dataframe(compliance_view, use_container_width=True)
-        else:
-            st.write("No compliance exposure detected in the current dataset.")
+    st.subheader("Compliance exposure preview")
+    compliance_view = df[
+        ["CVE ID", "Affected System", "detected_compliance", "recommended_action", "scheduled_date"]
+    ].copy()
+    compliance_view = compliance_view[compliance_view["detected_compliance"].fillna("") != ""]
+    if len(compliance_view) > 0:
+        st.dataframe(compliance_view, use_container_width=True)
+    else:
+        st.write("No compliance exposure detected in the current dataset.")
 
     st.subheader("Top explanations")
     for _, row in df.head(5).iterrows():
@@ -299,10 +318,9 @@ try:
             f"Action: **{row['recommended_action']}**  \n"
             f"Window: **{row['recommended_window']}**  \n"
             f"Scheduled Date: **{row['scheduled_date']}**  \n"
-            f"Slot: **{row.get('schedule_slot', 'N/A')}**  \n"
             f"{row['explanation']}"
         )
-        if "what_if_note" in row and str(row["what_if_note"]).strip():
+        if str(row.get("what_if_note", "")).strip():
             st.markdown(f"**What-If Note:** {row['what_if_note']}")
 
     csv_data = df.to_csv(index=False).encode("utf-8")
