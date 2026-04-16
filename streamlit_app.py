@@ -114,14 +114,8 @@ def run_pipeline(
 
     df = score_dataframe(df, risk_appetite)
     summary = build_summary(df, input_path, risk_appetite)
-
-    df = what_if_agent.run(
-        df,
-        what_if_cve=what_if_cve if what_if_cve and str(what_if_cve).strip() else None,
-        what_if_exploit_prob=float(what_if_exploit_prob),
-        what_if_delay=what_if_delay if what_if_delay and str(what_if_delay).strip() else None,
-        delay_days=int(delay_days),
-    )
+    df = apply_what_if(df, what_if_cve, what_if_exploit_prob)
+    df = prepare_dataframe(df)
 
     if what_if_cve and str(what_if_cve).strip():
         df = risk_agent.run(df)
